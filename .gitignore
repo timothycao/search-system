@@ -1,0 +1,13 @@
+# Project ignore rules.
+
+# Python venv
+.venv
+
+# Python cache files
+__pycache__
+
+# System files
+.DS_Store
+
+# Project data (raw, postings, index)
+data/
