@@ -4,9 +4,9 @@ from query.query import run_query
 from shared.config import INDEX_DIR
 
 def main() -> None:
-    index_path: str = INDEX_DIR
+    input_dir: str = INDEX_DIR
     query: str = input("Enter query: ")
-    results: List[str] = run_query(index_path, query)
+    results: List[str] = run_query(input_dir, query)
     print("Results:", results)
 
 if __name__ == "__main__":
