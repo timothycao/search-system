@@ -1,10 +1,12 @@
 from parser.parser import run_parser
-from shared.config import RAW_DATA_DIR, POSTINGS_DIR
+from shared.config import RAW_DATA_PATH, POSTINGS_DIR
 
 def main() -> None:
-    input_path: str = RAW_DATA_DIR
+    input_path: str = RAW_DATA_PATH
     output_path: str = POSTINGS_DIR
-    run_parser(input_path, output_path)
+    chunk_size: int = 100000
+    max_docs: int = 100
+    run_parser(input_path, output_path, chunk_size, max_docs)
 
 if __name__ == "__main__":
-    main()  
+    main()
