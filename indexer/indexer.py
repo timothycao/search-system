@@ -16,18 +16,21 @@ def run_indexer(input_dir: str, output_dir: str) -> None:
     Entry point for indexer.
     """
     # print(f"[Indexer] Merging postings from {input_dir}, writing index to {output_dir}")
-    postings: List[str] = merge_chunks(input_dir)
-    build_index(postings, output_dir)
+    merge_postings(input_dir, output_dir)
+    build_index(output_dir)
 
-def merge_chunks(postings_dir: str) -> List[str]:
+def merge_postings(input_dir: str, output_dir: str) -> List[str]:
     """
     Merge sorted posting chunks using a heap (multi-way merge).
-    Each chunk file is already sorted by (term, docID).
+    Writes merged postings sequentially to disk at merged_postings.txt.
     """
+    makedirs(output_dir, exist_ok=True)
+    merged_postings_path: str = path.join(output_dir, "merged_postings.txt")
+
     # Open each chunk file (sorted for deterministic order)
     chunk_files: List[TextIO] = []
-    for chunk_fname in sorted(listdir(postings_dir)):
-        chunk_path: str = path.join(postings_dir, chunk_fname)
+    for chunk_fname in sorted(listdir(input_dir)):
+        chunk_path: str = path.join(input_dir, chunk_fname)
         chunk_file: TextIO = open(chunk_path, "r", encoding="utf-8")
         chunk_files.append(chunk_file)
     
@@ -45,76 +48,96 @@ def merge_chunks(postings_dir: str) -> List[str]:
         heappush(min_heap, (term, int(doc_id), posting, i))
 
     # Merge postings in sorted order using heap
-    merged_postings: List[str] = []
-    with tqdm(total=total_postings, desc="Merging postings", unit="posting") as progress:
-        while min_heap:
-            # Repeatedly pop smallest tuple by (term, docID)
-            term, doc_id, posting, file_idx = heappop(min_heap)
-            merged_postings.append(posting)
-            progress.update(1)
+    with open(merged_postings_path, "w", encoding="utf-8") as merged_postings_file:
+        with tqdm(total=total_postings, desc="Merging postings", unit="posting") as progress:
+            while min_heap:
+                # Repeatedly pop smallest tuple by (term, docID)
+                term, doc_id, posting, file_idx = heappop(min_heap)
+                merged_postings_file.write(posting + "\n")
+                progress.update(1)
 
-            # Push next posting from same chunk (readline automatically advances file pointer)
-            next_posting: str = chunk_files[file_idx].readline().strip()
-            if next_posting:
-                next_term, next_doc_id, *_ = next_posting.split()
-                heappush(min_heap, (next_term, int(next_doc_id), next_posting, file_idx))
+                # Push next posting from same chunk (readline automatically advances file pointer)
+                next_posting: str = chunk_files[file_idx].readline().strip()
+                if next_posting:
+                    next_term, next_doc_id, *_ = next_posting.split()
+                    heappush(min_heap, (next_term, int(next_doc_id), next_posting, file_idx))
 
     # Close all open chunk files
     for chunk_file in chunk_files:
         chunk_file.close()
 
-    # TODO: stream merged postings directly to indexer for scalability
-    return merged_postings
-
-def build_index(postings: List[str], index_dir: str) -> None:
+def build_index(output_dir: str) -> None:
     """
     Build inverted index, lexicon, and page table from merged postings.
     """
-    inverted_index_path: str = path.join(index_dir, "inverted_index.bin")
-    lexicon_path: str = path.join(index_dir, "lexicon.json")
-    page_table_path: str = path.join(index_dir, "page_table.json")
+    makedirs(output_dir, exist_ok=True)
+    merged_postings_path: str = path.join(output_dir, "merged_postings.txt")
+    inverted_index_path: str = path.join(output_dir, "inverted_index.bin")
+    lexicon_path: str = path.join(output_dir, "lexicon.json")
+    page_table_path: str = path.join(output_dir, "page_table.json")
 
-    makedirs(index_dir, exist_ok=True)
-
+    # Initialize index data structures
     lexicon: Dict[str, Dict] = {}
-    term_to_postings: Dict[str, List[str]] = defaultdict(list)
     page_table: Dict[str, Dict] = defaultdict(lambda: {"length": 0})
 
+    # Intialize term tracking variables
+    current_term: str = ""
     current_offset: int = 0
-    with open(inverted_index_path, "w", encoding="utf-8") as inverted_index_file:
-        # Build term postings and doc lengths in memory
-        with tqdm(total=len(postings), desc="Preprocessing postings", unit="posting") as progress:
-            for posting in postings:
-                term, doc_id, freq = posting.split()
-                term_to_postings[term].append(f"{doc_id}:{freq}")
+    posting_list: List[str] = []
+
+    # Count total number of postings (for progress bar)
+    with open(merged_postings_path, "r", encoding="utf-8") as merged_postings_file:
+        total_postings: int = sum(1 for _ in merged_postings_file)
+
+    # Stream merged postings directly to index file
+    with open(merged_postings_path, "r", encoding="utf-8") as merged_postings_file, \
+         open(inverted_index_path, "w", encoding="utf-8") as inverted_index_file:
+        
+        # Sequentially process all postings and group by term
+        with tqdm(total=total_postings, desc="Building index", unit="posting") as progress:
+            for posting in merged_postings_file:
+                # Parse posting as (term, docID, freq)
+                term, doc_id, freq = posting.strip().split()
                 page_table[doc_id]["length"] += int(freq)
+
+                # When encountering new term, flush previous one
+                if current_term and term != current_term:
+                    entry: str = " ".join(posting_list)
+
+                    # TODO: replace with compressed binary encoding later
+                    inverted_index_file.write(f"{current_term} {entry}\n")
+
+                    # Record term metadata in lexicon
+                    lexicon[current_term] = {
+                        "offset": current_offset,   # byte offset
+                        "df": len(posting_list)     # document freq
+                    }
+
+                    # Advance offset by written length (+1 for new line)
+                    length: int = len(entry.encode("utf-8"))
+                    current_offset += length + 1
+                    posting_list.clear()
+
+                # Accumulate postings for the current term
+                current_term = term
+                posting_list.append(f"{doc_id}:{freq}")
                 progress.update(1)
 
-        # Write postings list for each term
-        with tqdm(total=len(term_to_postings), desc="Building index", unit="term") as progress:
-            for term, posting_list in term_to_postings.items():
+            # After final term, flush remaining postings
+            if current_term:
                 entry: str = " ".join(posting_list)
-                
-                # TODO: replace with compressed binary encoding later
-                inverted_index_file.write(f"{term} {entry}\n")
-
-                # Record term metadata in lexicon
-                lexicon[term] = {
+                inverted_index_file.write(f"{current_term} {entry}\n")
+                lexicon[current_term] = {
                     "offset": current_offset,
                     "df": len(posting_list)
                 }
 
-                # Advance offset by written length (+1 for new line)
-                length: int = len(entry.encode("utf-8"))
-                current_offset += length + 1
-                progress.update(1)
-
-    # Write lexicon to JSON
+    # Write lexicon to disk for lookup
     with open(lexicon_path, "w", encoding="utf-8") as lexicon_file:
         dump(lexicon, lexicon_file, indent=2)
 
-    # Write page table to JSON
+    # Write page table to disk for lookup
     with open(page_table_path, "w", encoding="utf-8") as page_table_file:
         dump(page_table, page_table_file, indent=2)
 
-    # print(f"[Indexer] Wrote inverted index, lexicon, and page table to {index_dir}")
+    # print(f"[Indexer] Wrote inverted index, lexicon, and page table to {output_dir}")
