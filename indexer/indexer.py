@@ -5,8 +5,9 @@ Merges posting chunks and builds inverted index, lexicon, and page table.
 
 from os import makedirs, listdir, path
 from json import dump
-from typing import Dict, List
+from typing import Dict, List, Tuple, TextIO
 from collections import defaultdict
+from heapq import heappush, heappop
 
 def run_indexer(input_dir: str, output_dir: str) -> None:
     """
@@ -18,20 +19,41 @@ def run_indexer(input_dir: str, output_dir: str) -> None:
 
 def merge_chunks(postings_dir: str) -> List[str]:
     """
-    Merge all chunk files into a single sorted posting list.
+    Merge sorted posting chunks using a heap (multi-way merge).
+    Each chunk file is already sorted by (term, docID).
     """
-    all_postings: List[str] = []
-    for chunk_fname in listdir(postings_dir):
-        # Read all lines from each chunk and extend into global postings
+    # Open each chunk file (sorted for deterministic order)
+    chunk_files: List[TextIO] = []
+    for chunk_fname in sorted(listdir(postings_dir)):
         chunk_path: str = path.join(postings_dir, chunk_fname)
-        with open(chunk_path, "r", encoding="utf-8") as chunk_file:
-            lines: List[str] = [line.strip() for line in chunk_file]
-            all_postings.extend(lines)
-    
-    # TEMP: global sort in memory (replace later for scalability)
-    all_postings.sort(key=lambda x: (x.split()[0], int(x.split()[1])))
-    
-    return all_postings
+        chunk_file: TextIO = open(chunk_path, "r", encoding="utf-8")
+        chunk_files.append(chunk_file)
+
+    # Initialize heap with first line from each chunk
+    min_heap: List[Tuple[str, int, str, int]] = []  # (term, docID, line, file index)
+    for i, chunk_file in enumerate(chunk_files):
+        line: str = chunk_file.readline().strip()   # read first line from each file
+        term, doc_id, *_ = line.split()
+        heappush(min_heap, (term, int(doc_id), line, i))
+
+    # Merge lines in sorted order using heap
+    merged_postings: List[str] = []
+    while min_heap:
+        # Repeatedly pop smallest tuple by (term, docID)
+        term, doc_id, line, chunk_file_idx = heappop(min_heap)
+        merged_postings.append(line)
+
+        # Push next line from same chunk file - readline() automatically advances file pointer
+        next_line: str = chunk_files[chunk_file_idx].readline().strip()
+        if next_line:
+            next_term, next_doc_id, *_ = next_line.split()
+            heappush(min_heap, (next_term, int(next_doc_id), next_line, chunk_file_idx))
+
+    # Close all open chunk files
+    for chunk_file in chunk_files:
+        chunk_file.close()
+
+    return merged_postings
 
 def build_index(postings: List[str], index_dir: str) -> None:
     """
