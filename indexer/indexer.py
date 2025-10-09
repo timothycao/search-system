@@ -11,6 +11,8 @@ from heapq import heappush, heappop
 
 from tqdm import tqdm
 
+from shared.compression import varbyte_encode
+
 def run_indexer(input_dir: str, output_dir: str) -> None:
     """
     Merge sorted posting chunks and build the final inverted index.
@@ -30,9 +32,10 @@ def run_indexer(input_dir: str, output_dir: str) -> None:
     # Initialize term tracking variables
     current_term: str = ""
     current_offset: int = 0
-    posting_list: List[str] = []
+    doc_ids: List[int] = []
+    freqs: List[int] = []
 
-    # Create generator for merged postings
+    # Create generator to stream merged postings
     generator = merge_postings(input_dir)
 
     # Count total number of postings across all chunks (for progress bar)
@@ -43,44 +46,51 @@ def run_indexer(input_dir: str, output_dir: str) -> None:
             total_postings += sum(1 for _ in chunk_file)
 
     # Stream merged postings directly to index file
-    with open(inverted_index_path, "w", encoding="utf-8") as inverted_index_file:
+    with open(inverted_index_path, "wb") as inverted_index_file:
         # Sequentially process all streamed postings
         with tqdm(total=total_postings, desc="Building index", unit="posting") as progress:
             for posting in generator:
                 # Parse posting as (term, docID, freq)
-                term, doc_id, freq = posting.strip().split()
-                page_table[doc_id]["length"] += int(freq)
+                term, doc_id_str, freq_str = posting.strip().split()
+                doc_id, freq = int(doc_id_str), int(freq_str)
+                page_table[doc_id]["length"] += freq
 
                 # When encountering a new term, flush previous one
                 if current_term and term != current_term:
-                    entry: str = " ".join(posting_list)
-
-                    # TODO: replace with compressed binary encoding later
-                    inverted_index_file.write(f"{current_term} {entry}\n")
+                    # Compress current term's postings and combine into single byte payload
+                    encoded_doc_ids, encoded_freqs = encode_postings(doc_ids, freqs)
+                    inverted_index_file.write(encoded_doc_ids + encoded_freqs)
 
                     # Record term metadata in lexicon
                     lexicon[current_term] = {
-                        "offset": current_offset,   # byte offset
-                        "df": len(posting_list)     # document freq
+                        "offset": current_offset,               # byte offset
+                        "df": len(doc_ids),                     # document freq
+                        "bytes_doc_ids": len(encoded_doc_ids),  # byte length of encoded docIDs
+                        "bytes_freqs": len(encoded_freqs)       # byte length of encoded freqs
                     }
 
-                    # Advance offset by written length (+1 for new line)
-                    length: int = len(entry.encode("utf-8"))
-                    current_offset += length + 1
-                    posting_list.clear()
+                    # Advance byte offset by written length
+                    current_offset += len(encoded_doc_ids) + len(encoded_freqs)
+
+                    # Reset buffers
+                    doc_ids.clear()
+                    freqs.clear()
 
                 # Accumulate postings for the current term
                 current_term = term
-                posting_list.append(f"{doc_id}:{freq}")
+                doc_ids.append(doc_id)
+                freqs.append(freq)
                 progress.update(1)
 
             # Flush last term after generator completes
             if current_term:
-                entry: str = " ".join(posting_list)
-                inverted_index_file.write(f"{current_term} {entry}\n")
+                encoded_doc_ids, encoded_freqs = encode_postings(doc_ids, freqs)
+                inverted_index_file.write(encoded_doc_ids + encoded_freqs)
                 lexicon[current_term] = {
                     "offset": current_offset,
-                    "df": len(posting_list)
+                    "df": len(doc_ids),
+                    "bytes_doc_ids": len(encoded_doc_ids),
+                    "bytes_freqs": len(encoded_freqs) 
                 }
 
     # Write lexicon to disk for lookup
@@ -92,7 +102,6 @@ def run_indexer(input_dir: str, output_dir: str) -> None:
         dump(page_table, page_table_file, indent=2)
 
     # print(f"[Indexer] Wrote inverted index, lexicon, and page table to {output_dir}")
-
 
 def merge_postings(input_dir: str) -> Generator[str, None, None]:
     """
@@ -128,3 +137,22 @@ def merge_postings(input_dir: str) -> Generator[str, None, None]:
     # Close all open chunk files
     for chunk_file in chunk_files:
         chunk_file.close()
+
+def encode_postings(doc_ids: List[int], freqs: List[int]) -> tuple[bytes, bytes]:
+    """
+    Compute gap-encoded docIDs and compress both docIDs and freqs using VarByte.
+    Returns a tuple of (encoded_doc_ids, encoded_freqs) as separate byte streams.
+    """
+    if not doc_ids: return b"", b""
+    
+    # Convert docIDs to gap form for better compression
+    gaps: List[int] = [doc_ids[0]]
+    for i in range(1, len(doc_ids)):
+        gaps.append(doc_ids[i] - doc_ids[i - 1])
+
+    # Compress both sequences
+    encoded_doc_ids = varbyte_encode(gaps)
+    encoded_freqs = varbyte_encode(freqs)
+
+    # Return encoded segments
+    return encoded_doc_ids, encoded_freqs
