@@ -5,6 +5,10 @@ Shared configuration constants.
 # Top K results to return
 DEFAULT_TOPK: int = 20
 
+# Parser configs
+CHUNK_SIZE: int = 1000000
+MAX_DOCS: int | None = None # for testing
+
 # Top level data directory
 DATA_DIR: str = "data"
 
