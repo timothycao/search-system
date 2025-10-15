@@ -11,6 +11,7 @@ from heapq import heappush, heappop
 
 from tqdm import tqdm
 
+from shared.config import BLOCK_SIZE
 from shared.compression import varbyte_encode
 
 def run_indexer(input_dir: str, output_dir: str) -> None:
@@ -19,6 +20,7 @@ def run_indexer(input_dir: str, output_dir: str) -> None:
     Each posting: 'term docID freq'
     - Streams merged postings directly from chunk files
     - Builds inverted_index.bin, lexicon.json, and page_table.json
+    - Writes postings in fixed-size blocks for efficient retrieval
     """
     makedirs(output_dir, exist_ok=True)
     inverted_index_path: str = path.join(output_dir, "inverted_index.bin")
@@ -30,7 +32,7 @@ def run_indexer(input_dir: str, output_dir: str) -> None:
     lexicon: Dict[str, Dict] = {}
     page_table: Dict[str, Dict] = defaultdict(lambda: {"length": 0})
 
-    # Track corpus statistics
+    # Initialize collection stats tracking
     total_len: int = 0
     total_docs: set = set()
 
@@ -52,7 +54,6 @@ def run_indexer(input_dir: str, output_dir: str) -> None:
 
     # Stream merged postings directly to index file
     with open(inverted_index_path, "wb") as inverted_index_file:
-        # Sequentially process all streamed postings
         with tqdm(total=total_postings, desc="Building index", unit="posting") as progress:
             for posting in generator:
                 # Parse posting as (term, docID, freq)
@@ -60,27 +61,18 @@ def run_indexer(input_dir: str, output_dir: str) -> None:
                 doc_id, freq = int(doc_id_str), int(freq_str)
                 page_table[doc_id]["length"] += freq
 
-                # Update corpus stats
+                # Update collection stats
                 total_len += freq
                 total_docs.add(doc_id)
 
-                # When encountering a new term, flush previous one
+                # Flush previous term when encountering a new one
                 if current_term and term != current_term:
-                    # Compress current term's postings and combine into single byte payload
-                    encoded_doc_ids, encoded_freqs = encode_postings(doc_ids, freqs)
-                    inverted_index_file.write(encoded_doc_ids + encoded_freqs)
-
-                    # Record term metadata in lexicon
-                    lexicon[current_term] = {
-                        "offset": current_offset,               # byte offset
-                        "df": len(doc_ids),                     # document freq
-                        "bytes_doc_ids": len(encoded_doc_ids),  # byte length of encoded docIDs
-                        "bytes_freqs": len(encoded_freqs)       # byte length of encoded freqs
-                    }
+                    # Write previous term's postings in compressed fixed-size blocks
+                    write_postings(inverted_index_file, lexicon, current_term, current_offset, doc_ids, freqs)
 
                     # Advance byte offset by written length
-                    current_offset += len(encoded_doc_ids) + len(encoded_freqs)
-
+                    current_offset += lexicon[current_term]["bytes"]
+                    
                     # Reset buffers
                     doc_ids.clear()
                     freqs.clear()
@@ -91,24 +83,17 @@ def run_indexer(input_dir: str, output_dir: str) -> None:
                 freqs.append(freq)
                 progress.update(1)
 
-            # Flush last term after generator completes
+            # Flush last term after merge completes
             if current_term:
-                encoded_doc_ids, encoded_freqs = encode_postings(doc_ids, freqs)
-                inverted_index_file.write(encoded_doc_ids + encoded_freqs)
-                lexicon[current_term] = {
-                    "offset": current_offset,
-                    "df": len(doc_ids),
-                    "bytes_doc_ids": len(encoded_doc_ids),
-                    "bytes_freqs": len(encoded_freqs) 
-                }
+                write_postings(inverted_index_file, lexicon, current_term, current_offset, doc_ids, freqs)
 
+    # Compute and record collection stats
     total_docs_count: int = len(total_docs)
     avg_len: float = total_len / total_docs_count if total_docs_count > 0 else 1.0
     collection_stats: Dict = {
         "total_docs": total_docs_count,
         "avg_len": avg_len
     }
-
 
     # Write lexicon to disk for lookup
     with open(lexicon_path, "w", encoding="utf-8") as lexicon_file:
@@ -118,6 +103,7 @@ def run_indexer(input_dir: str, output_dir: str) -> None:
     with open(page_table_path, "w", encoding="utf-8") as page_table_file:
         dump(page_table, page_table_file, indent=2)
 
+    # Write collection stats to disk
     with open(collection_stats_path, "w", encoding="utf-8") as collection_stats_file:
         dump(collection_stats, collection_stats_file, indent=2)
 
@@ -157,6 +143,62 @@ def merge_postings(input_dir: str) -> Generator[str, None, None]:
     # Close all open chunk files
     for chunk_file in chunk_files:
         chunk_file.close()
+
+def write_postings(
+    inverted_index_file,
+    lexicon: Dict[str, Dict],
+    term: str,
+    offset: int,
+    doc_ids: List[int],
+    freqs: List[int]
+) -> None:
+    """
+    Write a term's postings in fixed-size blocks to the index file.
+    Updates lexicon with block offsets and byte metadata.
+    """
+    if not doc_ids: return
+
+    # Initialize block tracking variables
+    blocks_meta: List[Dict] = []
+    current_offset: int = offset
+    total_bytes: int = 0
+
+    # Split and encode postings into fixed-size blocks
+    for i in range(0, len(doc_ids), BLOCK_SIZE):
+        # Extract current block slice
+        block_doc_ids = doc_ids[i : i + BLOCK_SIZE]
+        block_freqs = freqs[i : i + BLOCK_SIZE]
+
+        # Encode and write current block to index file
+        encoded_doc_ids, encoded_freqs = encode_postings(block_doc_ids, block_freqs)
+        inverted_index_file.write(encoded_doc_ids + encoded_freqs)
+
+        # Compute byte sizes for current block
+        bytes_doc_ids, bytes_freqs = len(encoded_doc_ids), len(encoded_freqs)
+        bytes_block = bytes_doc_ids + bytes_freqs
+
+        # Record block metadata
+        block_meta = {
+            "offset": current_offset,           # byte offset
+            "bytes_block": bytes_block,         # byte length of block
+            "bytes_doc_ids": bytes_doc_ids,     # byte length of encoded docIDs
+            "bytes_freqs": bytes_freqs,         # byte length of encoded freqs
+            "last_doc_id": block_doc_ids[-1]    # last docID in block (for skipping)
+        }
+        blocks_meta.append(block_meta)
+
+        # Advance byte offset and total
+        current_offset += bytes_block
+        total_bytes += bytes_block
+
+    # Record term metadata in lexicon
+    lexicon[term] = {
+        "offset": offset,                   # byte offset
+        "df": len(doc_ids),                 # document frequency
+        "block_count": len(blocks_meta),    # number of blocks
+        "blocks": blocks_meta,              # metadata for each block
+        "bytes": total_bytes                # total bytes across blocks
+    }
 
 def encode_postings(doc_ids: List[int], freqs: List[int]) -> tuple[bytes, bytes]:
     """

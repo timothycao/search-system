@@ -2,22 +2,19 @@
 inverted_list.py
 ----------------
 Binary-compatible InvertedList reader for VarByte-compressed postings.
-Fully compatible with DAAT and BM25 scoring logic in query2.py.
+Fully compatible with DAAT and BM25 scoring logic in query.py.
 """
 
-from typing import Dict, List, Tuple, Optional
 import math
-import struct
+from typing import Dict, List, Tuple
 
 from shared.compression import varbyte_decode
 
 INF_DOCID = 1 << 62
 
-
 # ---------------------------------------------------------
 #   Binary decoding utilities
 # ---------------------------------------------------------
-
 
 def decode_postings(encoded_doc_ids: bytes, encoded_freqs: bytes) -> Tuple[List[int], List[int]]:
     """
@@ -35,27 +32,37 @@ def decode_postings(encoded_doc_ids: bytes, encoded_freqs: bytes) -> Tuple[List[
 
     return decoded_doc_ids, decoded_freqs
 
-
 def read_postings(index_path: str, term_meta: Dict) -> Tuple[List[int], List[int]]:
     """
-    Read and decode postings for a given term from the binary inverted index.
-    The term_meta entry should include 'offset', 'bytes_doc_ids', and 'bytes_freqs'.
+    Read and decode all blocks for a given term from the binary index.
+    - Sequentially reads each block's encoded bytes from disk.
+    - Concatenates encoded bytes across all blocks before final decoding.
+    Returns (all_doc_ids, all_freqs).
     """
-    offset = term_meta["offset"]
-    bytes_doc_ids = term_meta["bytes_doc_ids"]
-    bytes_freqs = term_meta["bytes_freqs"]
+    blocks = term_meta.get("blocks", [])
+    if not blocks: return [], []
+
+    all_encoded_doc_ids = bytearray()
+    all_encoded_freqs = bytearray()
 
     with open(index_path, "rb") as index_file:
-        # Jump to the term’s byte offset
-        index_file.seek(offset)
+        for block in blocks:
+            offset = block["offset"]
+            bytes_doc_ids = block["bytes_doc_ids"]
+            bytes_freqs = block["bytes_freqs"]
+            
+            # Jump to the block's byte offset
+            index_file.seek(offset)
 
-        # Read the exact number of bytes for each segment
-        encoded_doc_ids = index_file.read(bytes_doc_ids)
-        encoded_freqs = index_file.read(bytes_freqs)
+            # Read the exact number of bytes for each segment
+            encoded_doc_ids = index_file.read(bytes_doc_ids)
+            encoded_freqs = index_file.read(bytes_freqs)
 
-    # Delegate decoding
-    return decode_postings(encoded_doc_ids, encoded_freqs)
+            # Append encoded bytes from the block (deferred decoding until all blocks are read)
+            all_encoded_doc_ids.extend(encoded_doc_ids)
+            all_encoded_freqs.extend(encoded_freqs)
 
+    return decode_postings(bytes(all_encoded_doc_ids), bytes(all_encoded_freqs))
 
 # ---------------------------------------------------------
 #   InvertedList class
@@ -63,7 +70,7 @@ def read_postings(index_path: str, term_meta: Dict) -> Tuple[List[int], List[int
 
 class InvertedList:
     """
-    Represents a single term’s postings list loaded from a binary index.
+    Represents a single term's postings list loaded from a binary index.
     Supports DAAT traversal and BM25 scoring.
     """
 
@@ -143,7 +150,6 @@ class InvertedList:
 
         return self.doc_id
 
-
     def getScore(self, doc_id: int) -> float:
         """Return the BM25 contribution of this term for the current docID."""
         if not self.docIDs or not self.freqs:
@@ -162,8 +168,6 @@ class InvertedList:
         doc_meta = self.page_table.get(str(doc_id), {})
         doc_len = doc_meta.get("length", 1)
         return self.getBM25(freq, doc_len)
-
-
 
     def closeList(self) -> None:
         """Close the list (no-op for binary file access, included for symmetry)."""

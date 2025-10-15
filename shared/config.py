@@ -2,12 +2,15 @@
 Shared configuration constants.
 """
 
-# Top K results to return
-DEFAULT_TOPK: int = 20
-
 # Parser configs
-CHUNK_SIZE: int = 1000000
+CHUNK_SIZE: int = 10000000
 MAX_DOCS: int | None = None # for testing
+
+# Indexer configs
+BLOCK_SIZE: int = 128
+
+# Query processor configs
+DEFAULT_TOPK: int = 20  # top k results to return
 
 # Top level data directory
 DATA_DIR: str = "data"
