@@ -24,10 +24,15 @@ def run_indexer(input_dir: str, output_dir: str) -> None:
     inverted_index_path: str = path.join(output_dir, "inverted_index.bin")
     lexicon_path: str = path.join(output_dir, "lexicon.json")
     page_table_path: str = path.join(output_dir, "page_table.json")
+    collection_stats_path: str = path.join(output_dir, "collection_stats.json")
 
     # Initialize index data structures
     lexicon: Dict[str, Dict] = {}
     page_table: Dict[str, Dict] = defaultdict(lambda: {"length": 0})
+
+    # Track corpus statistics
+    total_len: int = 0
+    total_docs: set = set()
 
     # Initialize term tracking variables
     current_term: str = ""
@@ -54,6 +59,10 @@ def run_indexer(input_dir: str, output_dir: str) -> None:
                 term, doc_id_str, freq_str = posting.strip().split()
                 doc_id, freq = int(doc_id_str), int(freq_str)
                 page_table[doc_id]["length"] += freq
+
+                # Update corpus stats
+                total_len += freq
+                total_docs.add(doc_id)
 
                 # When encountering a new term, flush previous one
                 if current_term and term != current_term:
@@ -93,6 +102,14 @@ def run_indexer(input_dir: str, output_dir: str) -> None:
                     "bytes_freqs": len(encoded_freqs) 
                 }
 
+    total_docs_count: int = len(total_docs)
+    avg_len: float = total_len / total_docs_count if total_docs_count > 0 else 1.0
+    collection_stats: Dict = {
+        "total_docs": total_docs_count,
+        "avg_len": avg_len
+    }
+
+
     # Write lexicon to disk for lookup
     with open(lexicon_path, "w", encoding="utf-8") as lexicon_file:
         dump(lexicon, lexicon_file, indent=2)
@@ -100,6 +117,9 @@ def run_indexer(input_dir: str, output_dir: str) -> None:
     # Write page table to disk for lookup
     with open(page_table_path, "w", encoding="utf-8") as page_table_file:
         dump(page_table, page_table_file, indent=2)
+
+    with open(collection_stats_path, "w", encoding="utf-8") as collection_stats_file:
+        dump(collection_stats, collection_stats_file, indent=2)
 
     # print(f"[Indexer] Wrote inverted index, lexicon, and page table to {output_dir}")
 

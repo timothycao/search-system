@@ -2,6 +2,9 @@
 Shared configuration constants.
 """
 
+# Top K results to return
+DEFAULT_TOPK: int = 20
+
 # Top level data directory
 DATA_DIR: str = "data"
 
