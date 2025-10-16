@@ -13,14 +13,14 @@ from shared.compression import varbyte_decode
 INF_DOCID = 1 << 62
 
 # ---------------------------------------------------------
-#   Binary decoding utilities
+#   Binary decoding utility
 # ---------------------------------------------------------
 
 def decode_postings(encoded_doc_ids: bytes, encoded_freqs: bytes) -> Tuple[List[int], List[int]]:
     """
     Decode VarByte-compressed docIDs and freqs from binary segments.
     - Converts gap-encoded docIDs back to absolute values.
-    Returns (decoded_doc_ids, decoded_freqs).
+    - Returns (decoded_doc_ids, decoded_freqs).
     """
     # Decode both sequences
     decoded_doc_ids = varbyte_decode(encoded_doc_ids)
@@ -32,45 +32,13 @@ def decode_postings(encoded_doc_ids: bytes, encoded_freqs: bytes) -> Tuple[List[
 
     return decoded_doc_ids, decoded_freqs
 
-def read_postings(index_path: str, term_meta: Dict) -> Tuple[List[int], List[int]]:
-    """
-    Read and decode all blocks for a given term from the binary index.
-    - Sequentially reads each block's encoded bytes from disk.
-    - Concatenates encoded bytes across all blocks before final decoding.
-    Returns (all_doc_ids, all_freqs).
-    """
-    blocks = term_meta.get("blocks", [])
-    if not blocks: return [], []
-
-    all_encoded_doc_ids = bytearray()
-    all_encoded_freqs = bytearray()
-
-    with open(index_path, "rb") as index_file:
-        for block in blocks:
-            offset = block["offset"]
-            bytes_doc_ids = block["bytes_doc_ids"]
-            bytes_freqs = block["bytes_freqs"]
-            
-            # Jump to the block's byte offset
-            index_file.seek(offset)
-
-            # Read the exact number of bytes for each segment
-            encoded_doc_ids = index_file.read(bytes_doc_ids)
-            encoded_freqs = index_file.read(bytes_freqs)
-
-            # Append encoded bytes from the block (deferred decoding until all blocks are read)
-            all_encoded_doc_ids.extend(encoded_doc_ids)
-            all_encoded_freqs.extend(encoded_freqs)
-
-    return decode_postings(bytes(all_encoded_doc_ids), bytes(all_encoded_freqs))
-
 # ---------------------------------------------------------
 #   InvertedList class
 # ---------------------------------------------------------
 
 class InvertedList:
     """
-    Represents a single term's postings list loaded from a binary index.
+    Represents a term's postings list stored in fixed-size blocks.
     Supports DAAT traversal and BM25 scoring.
     """
 
@@ -85,6 +53,7 @@ class InvertedList:
         k1: float,
         b: float
     ) -> None:
+        # Core metadata
         self.term = term
         self.term_meta = term_meta
         self.index_path = index_path
@@ -94,15 +63,58 @@ class InvertedList:
         self.k1 = k1
         self.b = b
 
-        # Read postings from binary file
-        self.docIDs, self.freqs = read_postings(index_path, term_meta)
-        self.df = term_meta.get("df", len(self.docIDs))
-        self.curr_idx = 0
-        self.doc_id = self.docIDs[0] if self.docIDs else INF_DOCID
+        # Block metadata
+        self.blocks = term_meta.get("blocks", [])
+        self.block_count = len(self.blocks)
+        self.block_last_doc_ids = [block["last_doc_id"] for block in self.blocks]
 
-        # Precompute IDF and maximum BM25 contribution
+        # Current traversal state
+        self.curr_block_idx = 0
+        self.curr_block_docIDs: List[int] = []
+        self.curr_block_freqs: List[int] = []
+        self.curr_idx = -1
+        self.doc_id = INF_DOCID
+
+        # Term-level stats
+        self.df = term_meta.get("df", 0)
         self.idf = self.compute_idf()
-        self.max_score = self.compute_max_score()
+        self.max_score = self.compute_max_score()   # maximum BM25 contribution
+
+        # Initialize first block if available
+        if self.block_count > 0:
+            self.load_block(0)
+            self.curr_idx = 0
+            if self.curr_block_docIDs:
+                self.doc_id = self.curr_block_docIDs[0]
+
+    # ------------------- Block I/O -------------------
+
+    def load_block(self, block_idx: int) -> None:
+        """Load and decode a single block from disk into memory."""
+        if block_idx < 0 or block_idx >= self.block_count:
+            self.curr_block_docIDs, self.curr_block_freqs = [], []
+            return
+
+        block = self.blocks[block_idx]
+        offset = block["offset"]
+        bytes_doc_ids = block["bytes_doc_ids"]
+        bytes_freqs = block["bytes_freqs"]
+
+        with open(self.index_path, "rb") as index_file:
+            # Jump to the block's byte offset
+            index_file.seek(offset)
+
+            # Read the exact number of bytes for each segment
+            encoded_doc_ids = index_file.read(bytes_doc_ids)
+            encoded_freqs = index_file.read(bytes_freqs)
+
+        # Decode current block postings
+        self.curr_block_docIDs, self.curr_block_freqs = decode_postings(encoded_doc_ids, encoded_freqs)
+        
+        # Update traversal state
+        self.curr_block_idx = block_idx
+        self.curr_idx = 0
+        self.doc_id = self.curr_block_docIDs[0] if self.curr_block_docIDs else INF_DOCID
 
     # ------------------- BM25, scoring, cache -------------------
 
@@ -119,52 +131,78 @@ class InvertedList:
         return self.idf * (numerator / denominator) if denominator != 0 else 0.0
 
     def compute_max_score(self) -> float:
-        """Compute the maximum BM25 score this term can contribute (for MaxScore)."""
+        """Estimate maximum possible BM25 contribution across all blocks."""
         max_score = 0.0
-        for doc_id, freq in zip(self.docIDs, self.freqs):
-            doc_meta = self.page_table.get(str(doc_id), {})
-            doc_len = doc_meta.get("length", 1)
-            score = self.getBM25(freq, doc_len)
-            if score > max_score:
-                max_score = score
+        for block_idx in range(self.block_count):
+            self.load_block(block_idx)
+            for doc_id, freq in zip(self.curr_block_docIDs, self.curr_block_freqs):
+                doc_meta = self.page_table.get(str(doc_id), {})
+                doc_len = doc_meta.get("length", 1)
+                score = self.getBM25(freq, doc_len)
+                if score > max_score: max_score = score
         return max_score
-    
-    def reset(self) -> None:
-        """Reset traversal state to the beginning of the list."""
-        self.curr_idx = 0
-        self.doc_id = self.docIDs[0] if self.docIDs else INF_DOCID
 
     # ------------------- Traversal API -------------------
 
-    def nextGEQ(self, k: int) -> int:
-        """Advance to the next docID ≥ k, or INF_DOCID if exhausted."""
-        while self.curr_idx < len(self.docIDs) and self.docIDs[self.curr_idx] < k:
-            self.curr_idx += 1
-
-        # If we've moved past the end of the list
-        if self.curr_idx >= len(self.docIDs):
-            self.doc_id = INF_DOCID
-            self.curr_idx = len(self.docIDs)  # Clamp safely
+    def reset(self) -> None:
+        """Reset traversal state to the first block."""
+        self.curr_block_idx = 0
+        if self.block_count > 0:
+            self.load_block(0)
+            self.curr_idx = 0
+            self.doc_id = self.curr_block_docIDs[0]
         else:
-            self.doc_id = self.docIDs[self.curr_idx]
+            self.curr_idx = -1
+            self.doc_id = INF_DOCID
+    
+    def nextGEQ(self, k: int) -> int:
+        """
+        Advance to the next docID ≥ k across blocks.
+        Uses block skipping via last_doc_id metadata.
+        """
+        while True:
+            # Skip entire blocks if their last docID < k
+            while (
+                self.curr_block_idx < self.block_count 
+                and self.block_last_doc_ids[self.curr_block_idx] < k
+            ):
+                self.curr_block_idx += 1
+                if self.curr_block_idx >= self.block_count:
+                    self.doc_id = INF_DOCID
+                    return self.doc_id
+                self.load_block(self.curr_block_idx)
 
-        return self.doc_id
+            # Within-block scan
+            while (
+                self.curr_idx < len(self.curr_block_docIDs)
+                and self.curr_block_docIDs[self.curr_idx] < k
+            ):
+                self.curr_idx += 1
+
+            # If we found docID ≥ k in current block
+            if self.curr_idx < len(self.curr_block_docIDs):
+                self.doc_id = self.curr_block_docIDs[self.curr_idx]
+                return self.doc_id
+
+            # Otherwise, move to next block and continue
+            self.curr_block_idx += 1
+            if self.curr_block_idx >= self.block_count:
+                self.doc_id = INF_DOCID
+                return self.doc_id
+            self.load_block(self.curr_block_idx)
 
     def getScore(self, doc_id: int) -> float:
-        """Return the BM25 contribution of this term for the current docID."""
-        if not self.docIDs or not self.freqs:
-            return 0.0
+        """Return BM25 score contribution for the current docID."""
+        if not self.curr_block_docIDs or not self.curr_block_freqs: return 0.0
 
         # Bounds check first
-        if self.curr_idx < 0 or self.curr_idx >= len(self.docIDs):
-            return 0.0
+        if self.curr_idx < 0 or self.curr_idx >= len(self.curr_block_docIDs): return 0.0
 
         # Ensure current posting matches target doc_id
-        if self.docIDs[self.curr_idx] != doc_id:
-            return 0.0
+        if self.curr_block_docIDs[self.curr_idx] != doc_id: return 0.0
 
         # Safe to access
-        freq = self.freqs[self.curr_idx] if self.curr_idx < len(self.freqs) else 0
+        freq = self.curr_block_freqs[self.curr_idx]
         doc_meta = self.page_table.get(str(doc_id), {})
         doc_len = doc_meta.get("length", 1)
         return self.getBM25(freq, doc_len)
