@@ -63,6 +63,9 @@ class InvertedList:
         self.k1 = k1
         self.b = b
 
+        # Open file handle once (persistent reuse)
+        self.file = open(index_path, "rb")
+
         # Block metadata
         self.blocks = term_meta.get("blocks", [])
         self.block_count = len(self.blocks)
@@ -100,13 +103,12 @@ class InvertedList:
         bytes_doc_ids = block["bytes_doc_ids"]
         bytes_freqs = block["bytes_freqs"]
 
-        with open(self.index_path, "rb") as index_file:
-            # Jump to the block's byte offset
-            index_file.seek(offset)
+        # Jump to the block's byte offset
+        self.file.seek(offset)
 
-            # Read the exact number of bytes for each segment
-            encoded_doc_ids = index_file.read(bytes_doc_ids)
-            encoded_freqs = index_file.read(bytes_freqs)
+        # Read the exact number of bytes for each segment
+        encoded_doc_ids = self.file.read(bytes_doc_ids)
+        encoded_freqs = self.file.read(bytes_freqs)
 
         # Decode current block postings
         self.curr_block_docIDs, self.curr_block_freqs = decode_postings(encoded_doc_ids, encoded_freqs)
@@ -209,4 +211,4 @@ class InvertedList:
 
     def closeList(self) -> None:
         """Close the list (no-op for binary file access, included for symmetry)."""
-        return
+        if hasattr(self, "file") and not self.file.closed: self.file.close()
