@@ -4,7 +4,7 @@ import time
 
 from query.inverted_list import InvertedList, INF_DOCID
 from query.inverted_list_cache import InvertedListCache
-from query.search_startup_context import QueryStartupContext
+from query.query_startup_context import QueryStartupContext
 
 # Global in memory cache instance
 LIST_CACHE = InvertedListCache()
