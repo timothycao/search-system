@@ -1,16 +1,7 @@
-"""
-inverted_list_cache.py
-----------------------
-Implements a simple Least Recently Used (LRU) cache for InvertedList objects.
-Used by query2.py to store frequently accessed term posting lists in memory.
-"""
-
 from collections import OrderedDict
-
 
 class InvertedListCache:
     """LRU cache for storing InvertedList objects."""
-
     def __init__(self, capacity: int = 10):
         self.cache = OrderedDict()
         self.capacity = capacity
@@ -32,7 +23,9 @@ class InvertedListCache:
             self.cache.move_to_end(term)
         else:
             if len(self.cache) >= self.capacity:
-                self.cache.popitem(last=False)  # remove oldest (LRU)
+                _, old_list = self.cache.popitem(last=False)  # remove oldest (LRU)
+                if hasattr(old_list, 'closeList'):
+                    old_list.closeList()  # Ensure resources are freed
             self.cache[term] = inverted_list
 
     def stats(self) -> str:
