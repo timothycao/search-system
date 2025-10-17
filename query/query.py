@@ -1,75 +1,14 @@
-"""
-query2.py
-----------
-Performs ranked retrieval over the binary, VarByte-compressed index.
-
-Implements DAAT traversal (AND mode) and MaxScore traversal (OR mode)
-using the binary-compatible InvertedList class.
-"""
-
-from os import path
-from json import load
 from typing import Dict, List, Tuple, Optional
 import heapq
 import time
 
-# Import from same package (relative import)
-from .inverted_list import InvertedList, INF_DOCID
-from .inverted_list_cache import InvertedListCache
+from query.inverted_list import InvertedList, INF_DOCID
+from query.inverted_list_cache import InvertedListCache
+from query.search_startup_context import QueryStartupContext
 
 # Global in memory cache instance
-LIST_CACHE = InvertedListCache(capacity=10)
-STARTUP_CONTEXT = None  
-
-
-# ---------------------------------------------------------
-#   Search Startup Context
-# ---------------------------------------------------------
-class SearchStartupContext:
-    """Holds immutable index-wide data loaded once per session."""
-    def __init__(self, input_dir: str):
-        self.input_dir = input_dir
-        self.lexicon_path = path.join(input_dir, "lexicon.json")
-        self.page_table_path = path.join(input_dir, "page_table.json")
-        self.index_path = path.join(input_dir, "inverted_index.bin")
-
-        # Load once
-        self.lexicon = self.load_json(self.lexicon_path)
-        self.page_table = self.load_json(self.page_table_path)
-
-        # Compute once
-        
-        self.stats_path = path.join(input_dir, "collection_stats.json")
-        bm25_stats = self.load_json(self.stats_path)
-        self.total_docs, self.avg_len = bm25_stats.get("total_docs", 0), bm25_stats.get("avg_len", 1.0)
-        
-        #self.total_docs, self.avg_len = self.compute_collection_stats()
-
-    def load_json(self, file_path: str) -> Dict:
-        """Load and return a JSON file as a dictionary."""
-        with open(file_path, "r", encoding="utf-8") as f:
-            data = load(f)
-        return data
-
-
-    def compute_collection_stats(self) -> Tuple[int, float]:
-        """
-        Compute the total number of documents and the average document length.
-        """
-        total_len = 0
-        for doc_meta in self.page_table.values():
-            doc_len = doc_meta.get("length", 0)
-            total_len += doc_len
-
-        total_docs = len(self.page_table)
-
-        if total_docs == 0:
-            avg_len = 1.0
-        else:
-            avg_len = total_len / total_docs
-
-        return total_docs, avg_len
-
+LIST_CACHE = InvertedListCache()
+QUERY_STARTUP_CONTEXT = None  
 
 # ---------------------------------------------------------
 #   Inverted List Management
@@ -113,10 +52,11 @@ def openList(term: str,
 
 def closeList(lp: Optional[InvertedList]) -> None:
     """Close an inverted list pointer (no-op for binary index)."""
-    if lp is not None:
-        lp.closeList()
-        #for blocked approach:
-        #lp.close()
+    if lp is None:
+        return
+    if lp.term in LIST_CACHE:
+        return
+    lp.closeList()
 
 # ---------------------------------------------------------
 #   DAAT Traversal and Ranking
@@ -219,11 +159,62 @@ def daat_disjunctive_maxscore(lists: List[InvertedList], k: int) -> List[Tuple[i
     return ranked
 
 
+
+def daat_disjunctive_blockmax_wand(lists: List[InvertedList], k: int) -> List[Tuple[int, float]]:
+    """
+    Disjunctive (OR) query traversal using Block-Max WAND optimization.
+    Uses per-block BM25 upper bounds to skip blocks that cannot beat the current threshold.
+    """
+    if not lists:
+        return []
+
+    # Sort lists by descending max_score (impact ordering)
+    lists.sort(key=lambda l: l.max_score, reverse=True)
+
+    topk: List[Tuple[float, int]] = []   # (score, docID)
+    threshold = 0.0
+
+    while True:
+        pivot_doc = min(l.doc_id for l in lists)
+        if pivot_doc >= INF_DOCID:
+            break
+
+        # --- Compute block-level upper bound ---
+        ub = sum(l.curr_block_max() for l in lists)
+        if ub < threshold:
+            # Skip smallest-docID list’s current block
+            smallest = min(lists, key=lambda l: l.doc_id)
+            smallest.advance_to_next_block()
+            continue
+        # --------------------------------------
+
+        # Score candidate doc
+        score = 0.0
+        for l in lists:
+            if l.doc_id == pivot_doc:
+                score += l.getScore(pivot_doc)
+
+        if score > 0.0:
+            if len(topk) < k:
+                heapq.heappush(topk, (score, pivot_doc))
+            elif score > topk[0][0]:
+                heapq.heapreplace(topk, (score, pivot_doc))
+            threshold = topk[0][0]
+
+        # Advance lists that matched pivot
+        for l in lists:
+            if l.doc_id == pivot_doc:
+                l.nextGEQ(pivot_doc + 1)
+
+    return sorted([(doc_id, score) for score, doc_id in topk],
+                  key=lambda x: (-x[1], x[0]))
+
+
 # ---------------------------------------------------------
 #   Query Entry Point
 # ---------------------------------------------------------
 
-def run_query(startup_context: SearchStartupContext,
+def run_query(startup_context: QueryStartupContext,
               query: str,
               mode: str = "and",
               top_k: int = 10,
@@ -231,17 +222,9 @@ def run_query(startup_context: SearchStartupContext,
               b: float = 0.75) -> List[Tuple[int, float]]:
     """
     Execute a ranked retrieval query using BM25.
-    mode: "and" for conjunctive, "or" for disjunctive (MaxScore)
+    mode: "and" for conjunctive, "or" for disjunctive (MaxScore & Block Max WAND)
     """
     time0 = time.perf_counter()
-
-    #lexicon_path = path.join(input_dir, "lexicon.json")
-    #page_table_path = path.join(input_dir, "page_table.json")
-    #index_path = path.join(input_dir, "inverted_index.bin")
-
-    #lexicon = load_json(lexicon_path)
-    #page_table = load_json(page_table_path)
-    #N, avg_len = compute_collection_stats(page_table)
 
     lexicon = startup_context.lexicon
     page_table = startup_context.page_table
@@ -272,6 +255,8 @@ def run_query(startup_context: SearchStartupContext,
     if mode == "and":
         results = daat_conjunctive(lists, top_k)
     elif mode == "or":
+        results = daat_disjunctive_blockmax_wand(lists, top_k)
+    elif mode == "maxscore-or":
         results = daat_disjunctive_maxscore(lists, top_k)
     else:
         raise ValueError(f"Unknown mode: {mode}")
