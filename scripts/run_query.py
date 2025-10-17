@@ -1,13 +1,13 @@
 from typing import List
-from query.query import SearchStartupContext, run_query, LIST_CACHE, STARTUP_CONTEXT
+from query.query import QueryStartupContext, run_query, LIST_CACHE, QUERY_STARTUP_CONTEXT
 from shared.config import INDEX_DIR, DEFAULT_TOPK
 
 
 def main() -> None:
-    global STARTUP_CONTEXT
+    global QUERY_STARTUP_CONTEXT
     input_dir: str = INDEX_DIR
     topk = DEFAULT_TOPK
-    STARTUP_CONTEXT = SearchStartupContext(input_dir)
+    QUERY_STARTUP_CONTEXT = QueryStartupContext(input_dir)
 
     print("Type your query below, or '+exit' to quit.\n")
 
@@ -23,7 +23,7 @@ def main() -> None:
             continue
 
         try:
-            results: List[str] = run_query(STARTUP_CONTEXT, query, query_mode, topk)
+            results: List[str] = run_query(QUERY_STARTUP_CONTEXT, query, query_mode, topk)
 
             if not results:
                 print("\nNo results found.\n")
