@@ -5,6 +5,7 @@ Merges posting chunks and builds inverted index, lexicon, and page table.
 
 from os import makedirs, listdir, path
 from json import dump
+from math import log
 from typing import Dict, List, Tuple, TextIO, Generator
 from collections import defaultdict
 from heapq import heappush, heappop
@@ -35,6 +36,7 @@ def run_indexer(input_dir: str, output_dir: str) -> None:
     # Initialize collection stats tracking
     total_len: int = 0
     total_docs: set = set()
+    avg_len_estimate: float = 1.0  # will be updated after indexing
 
     # Initialize term tracking variables
     current_term: str = ""
@@ -65,10 +67,14 @@ def run_indexer(input_dir: str, output_dir: str) -> None:
                 total_len += freq
                 total_docs.add(doc_id)
 
+                # Update running average estimate
+                if len(total_docs) > 0:
+                    avg_len_estimate = total_len / len(total_docs)
+
                 # Flush previous term when encountering a new one
                 if current_term and term != current_term:
                     # Write previous term's postings in compressed fixed-size blocks
-                    write_postings(inverted_index_file, lexicon, current_term, current_offset, doc_ids, freqs)
+                    write_postings(inverted_index_file, lexicon, current_term, current_offset, doc_ids, freqs, page_table, avg_len_estimate)
 
                     # Advance byte offset by written length
                     current_offset += lexicon[current_term]["bytes"]
@@ -85,7 +91,7 @@ def run_indexer(input_dir: str, output_dir: str) -> None:
 
             # Flush last term after merge completes
             if current_term:
-                write_postings(inverted_index_file, lexicon, current_term, current_offset, doc_ids, freqs)
+                write_postings(inverted_index_file, lexicon, current_term, current_offset, doc_ids, freqs, page_table, avg_len_estimate)
 
     # Compute and record collection stats
     total_docs_count: int = len(total_docs)
@@ -150,13 +156,23 @@ def write_postings(
     term: str,
     offset: int,
     doc_ids: List[int],
-    freqs: List[int]
+    freqs: List[int],
+    page_table: Dict[str, Dict],
+    avg_len: float
 ) -> None:
     """
     Write a term's postings in fixed-size blocks to the index file.
     Updates lexicon with block offsets and byte metadata.
     """
     if not doc_ids: return
+
+    # BM25 parameters
+    k1: float = 1.2
+    b: float = 0.75 
+    N: int = len(page_table)  # total number of documents in collection
+    df: int = len(doc_ids)    # document frequency for term
+
+    idf = compute_idf(df, N)
 
     # Initialize block tracking variables
     blocks_meta: List[Dict] = []
@@ -177,13 +193,27 @@ def write_postings(
         bytes_doc_ids, bytes_freqs = len(encoded_doc_ids), len(encoded_freqs)
         bytes_block = bytes_doc_ids + bytes_freqs
 
+        # Compute block level max BM25 score
+        block_max_score: float = 0.0
+        for doc_id, freq in zip(block_doc_ids, block_freqs):
+            doc_meta = page_table.get(str(doc_id), {}) or page_table.get(doc_id, {})
+            doc_len = doc_meta.get("length", 1)
+            denominator = freq + k1 * (1 - b + b * (doc_len / avg_len))
+            score = idf * ((freq * (k1 + 1.0)) / denominator) if denominator != 0 else 0.0
+            if score > block_max_score:
+                block_max_score = score
+
+        # block_max_score can be qunatized/rounded if needed for storage optimization
+        #block_max_score = round(block_max_score, 3)
+
         # Record block metadata
         block_meta = {
             "offset": current_offset,           # byte offset
             "bytes_block": bytes_block,         # byte length of block
             "bytes_doc_ids": bytes_doc_ids,     # byte length of encoded docIDs
             "bytes_freqs": bytes_freqs,         # byte length of encoded freqs
-            "last_doc_id": block_doc_ids[-1]    # last docID in block (for skipping)
+            "last_doc_id": block_doc_ids[-1],   # last docID in block (for skipping)
+            "block_max_score": block_max_score  # max BM25 score in block
         }
         blocks_meta.append(block_meta)
 
@@ -218,3 +248,12 @@ def encode_postings(doc_ids: List[int], freqs: List[int]) -> tuple[bytes, bytes]
 
     # Return encoded segments
     return encoded_doc_ids, encoded_freqs
+
+def compute_idf(df: int, N: int) -> float:
+    """
+    Compute the Inverse Document Frequency (IDF) for a term.
+    Uses the formula: log((N - df + 0.5) / (df + 0.5) + 1)
+    """
+    numerator = N - df + 0.5
+    denominator = df + 0.5
+    return log((numerator / denominator) + 1.0)
