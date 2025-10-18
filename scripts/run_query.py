@@ -17,8 +17,8 @@ def main() -> None:
             print("\nExiting search engine.")
             break
 
-        query_mode = input("Conjunctive (AND) or Disjunctive (OR)? [and/or]: ").strip().lower()
-        if query_mode not in ("and", "or"):
+        query_mode = input("Conjunctive or Disjunctive [MaxScore: or, Block Max WAND: bwand-or]? [and/or/bwand-or]: ").strip().lower()
+        if query_mode not in ("and", "or", "bwand-or"):
             print("Invalid choice. Please type 'and' or 'or'.\n")
             continue
 
