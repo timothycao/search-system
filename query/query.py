@@ -83,6 +83,10 @@ def daat_conjunctive(lists, k):
     if not lists:
         return []
 
+    # Only perform pre-processing sort if multiple lists are present
+    if len(lists) > 1:
+        lists.sort(key=lambda lp: lp.df)
+
     heap = []
 
     while True:
@@ -179,14 +183,14 @@ def daat_disjunctive_blockmax_wand(lists: List[InvertedList], k: int) -> List[Tu
         if pivot_doc >= INF_DOCID:
             break
 
-        # --- Compute block-level upper bound ---
+        # Compute block-level upper bound 
         ub = sum(l.curr_block_max() for l in lists)
         if ub < threshold:
             # Skip smallest-docID list’s current block
             smallest = min(lists, key=lambda l: l.doc_id)
             smallest.advance_to_next_block()
             continue
-        # --------------------------------------
+        
 
         # Score candidate doc
         score = 0.0
@@ -206,8 +210,7 @@ def daat_disjunctive_blockmax_wand(lists: List[InvertedList], k: int) -> List[Tu
             if l.doc_id == pivot_doc:
                 l.nextGEQ(pivot_doc + 1)
 
-    return sorted([(doc_id, score) for score, doc_id in topk],
-                  key=lambda x: (-x[1], x[0]))
+    return sorted([(doc_id, score) for score, doc_id in topk], key=lambda x: (-x[1], x[0]))
 
 
 # ---------------------------------------------------------
@@ -255,9 +258,9 @@ def run_query(startup_context: QueryStartupContext,
     if mode == "and":
         results = daat_conjunctive(lists, top_k)
     elif mode == "or":
-        results = daat_disjunctive_blockmax_wand(lists, top_k)
-    elif mode == "maxscore-or":
         results = daat_disjunctive_maxscore(lists, top_k)
+    elif mode == "bwand-or":
+        results = daat_disjunctive_blockmax_wand(lists, top_k)
     else:
         raise ValueError(f"Unknown mode: {mode}")
     
