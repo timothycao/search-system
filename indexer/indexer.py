@@ -203,7 +203,7 @@ def write_postings(
             if score > block_max_score:
                 block_max_score = score
 
-        # block_max_score can be qunatized/rounded if needed for storage optimization
+        # TODO: block_max_score can be qunatized/rounded if needed for storage optimization
         #block_max_score = round(block_max_score, 3)
 
         # Record block metadata
