@@ -1,9 +1,5 @@
-"""
-Shared configuration constants.
-"""
-
 # Parser configs
-CHUNK_SIZE: int = 10000000
+CHUNK_SIZE: int = 2000000  # number of lines to read into memory at once during parsing
 MAX_DOCS: int | None = None # for testing
 
 # Indexer configs
