@@ -2,7 +2,6 @@ from os import path
 from json import load
 from typing import Dict
 
-
 class QueryStartupContext:
     """Holds immutable index-wide data loaded once per session."""
     def __init__(self, input_dir: str):

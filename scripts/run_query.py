@@ -1,6 +1,6 @@
 from typing import List
-from query.query import QueryStartupContext, run_query, LIST_CACHE, QUERY_STARTUP_CONTEXT
-from shared.config import INDEX_DIR, DEFAULT_TOPK
+from search_system.query.query import QueryStartupContext, run_query, LIST_CACHE, QUERY_STARTUP_CONTEXT
+from search_system.shared.config import INDEX_DIR, DEFAULT_TOPK
 
 
 def main() -> None:

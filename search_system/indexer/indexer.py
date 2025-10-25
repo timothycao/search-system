@@ -12,10 +12,9 @@ from heapq import heappush, heappop
 
 from tqdm import tqdm
 
-from shared.config import BLOCK_SIZE
-from shared.compression import varbyte_encode
+from search_system.shared.compression import varbyte_encode
 
-def run_indexer(input_dir: str, output_dir: str) -> None:
+def run_indexer(input_dir: str, output_dir: str, block_size: int = 128) -> None:
     """
     Merge sorted posting chunks and build the final inverted index.
     Each posting: 'term docID freq'
@@ -74,7 +73,7 @@ def run_indexer(input_dir: str, output_dir: str) -> None:
                 # Flush previous term when encountering a new one
                 if current_term and term != current_term:
                     # Write previous term's postings in compressed fixed-size blocks
-                    write_postings(inverted_index_file, lexicon, current_term, current_offset, doc_ids, freqs, page_table, avg_len_estimate)
+                    write_postings(inverted_index_file, lexicon, block_size, current_term, current_offset, doc_ids, freqs, page_table, avg_len_estimate)
 
                     # Advance byte offset by written length
                     current_offset += lexicon[current_term]["bytes"]
@@ -91,7 +90,7 @@ def run_indexer(input_dir: str, output_dir: str) -> None:
 
             # Flush last term after merge completes
             if current_term:
-                write_postings(inverted_index_file, lexicon, current_term, current_offset, doc_ids, freqs, page_table, avg_len_estimate)
+                write_postings(inverted_index_file, lexicon, block_size, current_term, current_offset, doc_ids, freqs, page_table, avg_len_estimate)
 
     # Compute and record collection stats
     total_docs_count: int = len(total_docs)
@@ -153,6 +152,7 @@ def merge_postings(input_dir: str) -> Generator[str, None, None]:
 def write_postings(
     inverted_index_file,
     lexicon: Dict[str, Dict],
+    block_size: int,
     term: str,
     offset: int,
     doc_ids: List[int],
@@ -180,10 +180,10 @@ def write_postings(
     total_bytes: int = 0
 
     # Split and encode postings into fixed-size blocks
-    for i in range(0, len(doc_ids), BLOCK_SIZE):
+    for i in range(0, len(doc_ids), block_size):
         # Extract current block slice
-        block_doc_ids = doc_ids[i : i + BLOCK_SIZE]
-        block_freqs = freqs[i : i + BLOCK_SIZE]
+        block_doc_ids = doc_ids[i : i + block_size]
+        block_freqs = freqs[i : i + block_size]
 
         # Encode and write current block to index file
         encoded_doc_ids, encoded_freqs = encode_postings(block_doc_ids, block_freqs)

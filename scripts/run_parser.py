@@ -1,5 +1,5 @@
-from parser.parser import run_parser
-from shared.config import RAW_DATA_PATH, POSTINGS_DIR, CHUNK_SIZE, MAX_DOCS
+from search_system.parser.parser import run_parser
+from search_system.shared.config import RAW_DATA_PATH, POSTINGS_DIR, CHUNK_SIZE, MAX_DOCS
 
 def main() -> None:
     input_path: str = RAW_DATA_PATH

@@ -9,9 +9,9 @@ from collections import defaultdict
 
 from tqdm import tqdm
 
-from shared.utils import tokenize
+from search_system.shared.utils import tokenize
 
-def run_parser(input_path: str, output_dir: str, chunk_size: int = 100000, max_docs: int = None) -> None:
+def run_parser(input_path: str, output_dir: str, chunk_size: int = 1000000, max_docs: int = None) -> None:
     """
     Parse MS MARCO collection.tsv and produce posting chunks.
     Each posting: 'term docID freq'

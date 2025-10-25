@@ -1,6 +1,7 @@
 """
 Shared helper functions.
 """
+
 from typing import List
 from re import sub
 

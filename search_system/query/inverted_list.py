@@ -2,7 +2,7 @@ import math
 from typing import Dict, List, Tuple
 import bisect
 
-from shared.compression import varbyte_decode
+from search_system.shared.compression import varbyte_decode
 
 INF_DOCID = 1 << 62
 

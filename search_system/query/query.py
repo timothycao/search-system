@@ -2,9 +2,9 @@ from typing import Dict, List, Tuple, Optional
 import heapq
 import time
 
-from query.inverted_list import InvertedList, INF_DOCID
-from query.inverted_list_cache import InvertedListCache
-from query.query_startup_context import QueryStartupContext
+from search_system.query.inverted_list import InvertedList, INF_DOCID
+from search_system.query.inverted_list_cache import InvertedListCache
+from search_system.query.query_startup_context import QueryStartupContext
 
 # Global in memory cache instance
 LIST_CACHE = InvertedListCache()
